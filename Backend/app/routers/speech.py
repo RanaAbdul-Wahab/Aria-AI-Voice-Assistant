@@ -1,17 +1,19 @@
 import logging
-import os
 
 from fastapi import (
     APIRouter,
     File,
     Form,
     HTTPException,
-    Response,
     UploadFile,
 )
-from pydantic import BaseModel, Field
-from starlette.concurrency import run_in_threadpool
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 
+from ..schemas import (
+    SpeechToTextResponse,
+    TextToSpeechRequest,
+)
 from ..services.speech_to_text import (
     SpeechToTextService,
 )
@@ -22,194 +24,152 @@ from ..services.text_to_speech import (
 
 logger = logging.getLogger(__name__)
 
+
 router = APIRouter(
     prefix="/api",
-    tags=["Speech"],
+    tags=["speech"],
 )
 
 
-MAX_AUDIO_SIZE_BYTES = 10 * 1024 * 1024
+speech_to_text_service = SpeechToTextService()
 
-SUPPORTED_LANGUAGES = {
-    "en-IN",
-    "en-US",
-    "ur-PK",
-}
+text_to_speech_service = TextToSpeechService()
 
-DEFAULT_STT_LANGUAGE = os.getenv(
-    "STT_DEFAULT_LANGUAGE",
-    "en-IN",
+
+@router.post(
+    "/stt",
+    response_model=SpeechToTextResponse,
 )
-
-DEFAULT_TTS_LANGUAGE = os.getenv(
-    "TTS_DEFAULT_LANGUAGE",
-    "en-IN",
-)
-
-
-stt_service = SpeechToTextService()
-tts_service = TextToSpeechService()
-
-
-class TextToSpeechRequest(BaseModel):
-    text: str = Field(
-        min_length=1,
-    )
-
-    language_code: str = Field(
-        default=DEFAULT_TTS_LANGUAGE,
-    )
-
-    voice_name: str | None = None
-    prompt: str | None = None
-
-
-@router.post("/stt")
-async def transcribe_audio(
+async def speech_to_text(
     audio: UploadFile = File(...),
+
     language_code: str = Form(
-        default=DEFAULT_STT_LANGUAGE,
+        default="en-IN",
     ),
-) -> dict[str, str]:
+) -> SpeechToTextResponse:
     """
-    Convert uploaded microphone audio into text.
+    Convert an uploaded browser recording into text
+    using Google Cloud Speech-to-Text Chirp 3.
     """
-
-    if language_code not in SUPPORTED_LANGUAGES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Unsupported language: {language_code}. "
-                f"Supported values: "
-                f"{sorted(SUPPORTED_LANGUAGES)}"
-            ),
-        )
-
-    if (
-        audio.content_type
-        and not audio.content_type.startswith(
-            "audio/"
-        )
-    ):
-        raise HTTPException(
-            status_code=415,
-            detail="The uploaded file must be audio.",
-        )
-
-    audio_content = await audio.read()
-
-    await audio.close()
-
-    if not audio_content:
-        raise HTTPException(
-            status_code=400,
-            detail="The audio recording is empty.",
-        )
-
-    if (
-        len(audio_content)
-        > MAX_AUDIO_SIZE_BYTES
-    ):
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                "The recording is too large. "
-                "Keep it below 10 MB."
-            ),
-        )
 
     try:
+        audio_content = await audio.read()
+
+        if not audio_content:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The uploaded audio recording is empty."
+                ),
+            )
+
+        logger.info(
+            "STT request: filename=%s type=%s size=%s language=%s",
+            audio.filename,
+            audio.content_type,
+            len(audio_content),
+            language_code,
+        )
+
         transcript = await run_in_threadpool(
-            stt_service.transcribe,
+            speech_to_text_service.transcribe,
             audio_content,
             language_code,
         )
 
-        return {
-            "transcript": transcript,
-            "language_code": language_code,
-            "model": stt_service.model,
-        }
+        return SpeechToTextResponse(
+            transcript=transcript,
+            language_code=language_code,
+        )
+
+    except HTTPException:
+        raise
 
     except ValueError as error:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail=str(error),
         ) from error
 
     except Exception as error:
         logger.exception(
-            "Speech-to-Text request failed"
+            "Speech-to-text request failed."
         )
 
         raise HTTPException(
-            status_code=502,
-            detail=(
-                "Speech-to-Text failed. "
-                "Check the Speech API, billing, "
-                "permissions, and microphone recording."
-            ),
+            status_code=500,
+            detail="Speech transcription failed.",
         ) from error
+
+    finally:
+        await audio.close()
 
 
 @router.post("/tts")
-async def synthesize_speech(
+async def text_to_speech(
     request: TextToSpeechRequest,
 ) -> Response:
     """
-    Convert assistant text into MP3 audio.
+    Convert assistant text into WAV audio.
     """
 
-    if (
-        request.language_code
-        not in SUPPORTED_LANGUAGES
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Unsupported speech language: "
-                f"{request.language_code}"
-            ),
+    try:
+        clean_text = request.text.strip()
+
+        if not clean_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Text cannot be empty.",
+            )
+
+        logger.info(
+            "TTS request: characters=%s language=%s",
+            len(clean_text),
+            request.language_code,
         )
 
-    try:
         audio_content = await run_in_threadpool(
-            tts_service.synthesize,
-            request.text,
+            text_to_speech_service.synthesize,
+            clean_text,
             request.language_code,
-            request.voice_name,
-            request.prompt,
+        )
+
+        if not audio_content:
+            raise RuntimeError(
+                "The TTS service returned empty audio."
+            )
+
+        logger.info(
+            "TTS generated %s bytes.",
+            len(audio_content),
         )
 
         return Response(
             content=audio_content,
-            media_type="audio/mpeg",
+            media_type="audio/wav",
             headers={
-                "Cache-Control": "no-store",
                 "Content-Disposition": (
-                    'inline; filename="assistant.mp3"'
+                    'inline; filename="assistant-response.wav"'
                 ),
-                "Content-Length": str(
-                    len(audio_content)
-                ),
+                "Cache-Control": "no-store",
             },
         )
+
+    except HTTPException:
+        raise
+
     except ValueError as error:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail=str(error),
         ) from error
 
     except Exception as error:
         logger.exception(
-            "Text-to-Speech request failed"
+            "Text-to-speech request failed."
         )
 
         raise HTTPException(
-            status_code=502,
-            detail=(
-                "Text-to-Speech failed. "
-                "Check the Text-to-Speech API, "
-                "billing and permissions."
-            ),
+            status_code=500,
+            detail="Voice generation failed.",
         ) from error

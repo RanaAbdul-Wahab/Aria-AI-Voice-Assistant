@@ -2,6 +2,7 @@
   box-sizing: border-box;
 }
 
+
 :root {
   font-family:
     Inter,
@@ -12,23 +13,29 @@
     "Segoe UI",
     sans-serif;
 
-  color: #172033;
-  background: #eef2ff;
+  color: #182033;
+  background: #f6f8fc;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
 
-html {
+
+html,
+body,
+#root {
+  width: 100%;
   min-width: 320px;
   min-height: 100%;
-}
 
-body {
-  min-width: 320px;
-  min-height: 100vh;
   margin: 0;
 }
+
+
+body {
+  min-height: 100vh;
+}
+
 
 button,
 textarea,
@@ -37,14 +44,12 @@ input {
   font: inherit;
 }
 
+
 button {
   cursor: pointer;
 }
 
+
 button:disabled {
   cursor: not-allowed;
-}
-
-#root {
-  min-height: 100vh;
 }

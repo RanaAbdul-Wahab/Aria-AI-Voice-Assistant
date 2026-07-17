@@ -1,63 +1,78 @@
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-import os
 
 from dotenv import load_dotenv
 
 
-# ---------------------------------------------------------
-# Locate and load Backend/.env
-# ---------------------------------------------------------
+# Demo_project/Backend
+BACKEND_DIRECTORY = (
+    Path(__file__).resolve().parent.parent
+)
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-ENV_FILE = BACKEND_DIR / ".env"
+ENV_FILE = BACKEND_DIRECTORY / ".env"
 
-if not ENV_FILE.exists():
-    raise RuntimeError(
-        f".env file was not found at: {ENV_FILE}"
-    )
-
-# override=True ensures the values inside Backend/.env are applied.
 load_dotenv(
     dotenv_path=ENV_FILE,
     override=True,
 )
 
 
-# ---------------------------------------------------------
-# Force ADK to use Google Cloud / Vertex AI
-# ---------------------------------------------------------
+def get_first_value(
+    *variable_names: str,
+    default: str = "",
+) -> str:
+    """
+    Return the first available non-empty environment value.
+    """
 
-enterprise_value = os.getenv(
-    "GOOGLE_GENAI_USE_ENTERPRISE",
-    "",
-).strip().lower()
+    for variable_name in variable_names:
+        value = os.getenv(
+            variable_name,
+            "",
+        ).strip()
 
-vertexai_value = os.getenv(
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "",
-).strip().lower()
+        if value:
+            return value
 
-truthy_values = {
-    "true",
-    "1",
-    "yes",
-}
+    return default.strip()
 
-if (
-    enterprise_value not in truthy_values
-    and vertexai_value not in truthy_values
-):
-    raise RuntimeError(
-        "Vertex AI mode is not enabled. Add these lines to Backend/.env:\n"
-        "GOOGLE_GENAI_USE_ENTERPRISE=TRUE\n"
-        "GOOGLE_GENAI_USE_VERTEXAI=TRUE"
-    )
 
-# Keep both variables available for old and new ADK versions.
-os.environ["GOOGLE_GENAI_USE_ENTERPRISE"] = "TRUE"
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+def get_integer(
+    variable_name: str,
+    default: int,
+) -> int:
+    raw_value = os.getenv(
+        variable_name,
+        str(default),
+    ).strip()
+
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{variable_name} must be an integer. "
+            f"Current value: {raw_value}"
+        ) from error
+
+
+def get_float(
+    variable_name: str,
+    default: float,
+) -> float:
+    raw_value = os.getenv(
+        variable_name,
+        str(default),
+    ).strip()
+
+    try:
+        return float(raw_value)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{variable_name} must be a number. "
+            f"Current value: {raw_value}"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -65,128 +80,136 @@ class Settings:
     project_id: str
     location: str
     model_id: str
-    rag_corpus: str
+
+    rag_corpus_name: str
     rag_top_k: int
     rag_distance_threshold: float
+
     frontend_origin: str
+    app_name: str
 
+    @property
+    def rag_corpus(self) -> str:
+        """
+        Backward-compatible alias for older code that uses
+        settings.rag_corpus.
+        """
 
-@lru_cache
-def get_settings() -> Settings:
-    project_id = os.getenv(
-        "GOOGLE_CLOUD_PROJECT",
-        "",
-    ).strip()
+        return self.rag_corpus_name
 
-    location = os.getenv(
-        "GOOGLE_CLOUD_LOCATION",
-        "",
-    ).strip()
+    @classmethod
+    def from_environment(
+        cls,
+    ) -> "Settings":
+        project_id = get_first_value(
+            "GOOGLE_CLOUD_PROJECT",
+            "PROJECT_ID",
+        )
 
-    model_id = os.getenv(
-        "MODEL_ID",
-        "gemini-2.5-flash",
-    ).strip()
+        location = get_first_value(
+            "GOOGLE_CLOUD_LOCATION",
+            "LOCATION",
+            "VERTEX_LOCATION",
+            default="europe-west3",
+        )
 
-    rag_corpus = os.getenv(
-        "RAG_CORPUS",
-        "",
-    ).strip()
+        model_id = get_first_value(
+            "MODEL_ID",
+            "GOOGLE_MODEL",
+            default="gemini-2.5-flash",
+        )
 
-    frontend_origin = os.getenv(
-        "FRONTEND_ORIGIN",
-        "http://127.0.0.1:5173",
-    ).strip()
+        rag_corpus_name = get_first_value(
+            "RAG_CORPUS_NAME",
+            "RAG_CORPUS",
+            "RAG_CORPUS_RESOURCE_NAME",
+            "VERTEX_RAG_CORPUS",
+        )
 
-    try:
-        rag_top_k = int(
-            os.getenv(
+        frontend_origin = get_first_value(
+            "FRONTEND_ORIGIN",
+            default="http://localhost:5173",
+        )
+
+        app_name = get_first_value(
+            "ADK_APP_NAME",
+            default="voice_ai_assistant",
+        )
+
+        missing_variables: list[str] = []
+
+        if not project_id:
+            missing_variables.append(
+                "GOOGLE_CLOUD_PROJECT"
+            )
+
+        if not rag_corpus_name:
+            missing_variables.append(
+                "RAG_CORPUS_NAME"
+            )
+
+        if missing_variables:
+            raise RuntimeError(
+                "Missing required environment variables: "
+                + ", ".join(missing_variables)
+                + ". Add them to Backend/.env."
+            )
+
+        return cls(
+            project_id=project_id,
+            location=location,
+            model_id=model_id,
+
+            rag_corpus_name=(
+                rag_corpus_name
+            ),
+
+            rag_top_k=get_integer(
                 "RAG_TOP_K",
-                "3",
-            )
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            "RAG_TOP_K must be a whole number."
-        ) from error
+                5,
+            ),
 
-    try:
-        rag_distance_threshold = float(
-            os.getenv(
+            rag_distance_threshold=get_float(
                 "RAG_DISTANCE_THRESHOLD",
-                "0.5",
-            )
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            "RAG_DISTANCE_THRESHOLD must be a decimal number."
-        ) from error
+                0.6,
+            ),
 
-    missing_variables = []
+            frontend_origin=(
+                frontend_origin
+            ),
 
-    if not project_id:
-        missing_variables.append(
-            "GOOGLE_CLOUD_PROJECT"
+            app_name=app_name,
         )
 
-    if not location:
-        missing_variables.append(
-            "GOOGLE_CLOUD_LOCATION"
-        )
 
-    if not model_id:
-        missing_variables.append(
-            "MODEL_ID"
-        )
+settings = Settings.from_environment()
 
-    if not rag_corpus:
-        missing_variables.append(
-            "RAG_CORPUS"
-        )
 
-    if missing_variables:
-        raise RuntimeError(
-            "Missing environment variable(s): "
-            + ", ".join(missing_variables)
-        )
+# Ensure ADK and Google Gen AI use Vertex AI.
+os.environ["GOOGLE_CLOUD_PROJECT"] = (
+    settings.project_id
+)
 
-    placeholders = (
-        "YOUR_REAL_CORPUS_NUMBER",
-        "YOUR_CORPUS_NUMBER",
-        "REPLACE_ME",
-    )
+os.environ["GOOGLE_CLOUD_LOCATION"] = (
+    settings.location
+)
 
-    if any(
-        placeholder in rag_corpus
-        for placeholder in placeholders
-    ):
-        raise RuntimeError(
-            "RAG_CORPUS still contains a placeholder. "
-            "Add the real corpus resource name."
-        )
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = (
+    "TRUE"
+)
 
-    if not rag_corpus.startswith("projects/"):
-        raise RuntimeError(
-            "RAG_CORPUS must be the complete resource name "
-            "starting with 'projects/'."
-        )
 
-    if not 1 <= rag_top_k <= 20:
-        raise RuntimeError(
-            "RAG_TOP_K must be between 1 and 20."
-        )
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """
+    Return the shared application settings.
+    """
 
-    if not 0.0 <= rag_distance_threshold <= 1.0:
-        raise RuntimeError(
-            "RAG_DISTANCE_THRESHOLD must be between 0 and 1."
-        )
+    return settings
 
-    return Settings(
-        project_id=project_id,
-        location=location,
-        model_id=model_id,
-        rag_corpus=rag_corpus,
-        rag_top_k=rag_top_k,
-        rag_distance_threshold=rag_distance_threshold,
-        frontend_origin=frontend_origin,
-    )
+
+__all__ = [
+    "Settings",
+    "settings",
+    "get_settings",
+]

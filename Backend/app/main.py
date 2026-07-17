@@ -1,33 +1,33 @@
 import logging
-from uuid import uuid4
+import os
+import re
+import uuid
+from contextlib import asynccontextmanager
 
+from fastapi import (
+    FastAPI,
+    HTTPException,
+)
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+from pydantic import (
+    BaseModel,
+    Field,
+)
+
+from .agent_runtime import AgentRuntime
+from .agents.master_agent import (
+    master_agent,
+)
 from .config import get_settings
-
-settings = get_settings()
 from .routers.speech import (
     router as speech_router,
 )
 
-from .agents.master_agent import master_agent
-from .agents.rag_agent import rag_agent
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
-from .agent_runtime import AgentRuntime
-from .agents.master_agent import master_agent
-from .agents.rag_agent import rag_agent
-from .config import get_settings
-from .schemas import (
-    AgentDescription,
-    ChatRequest,
-    ChatResponse,
-    HealthResponse,
-)
-
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO
 )
 
 logger = logging.getLogger(
@@ -37,52 +37,207 @@ logger = logging.getLogger(
 
 settings = get_settings()
 
+master_runtime = AgentRuntime(
+    master_agent
+)
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(
+        min_length=1,
+        max_length=5000,
+    )
+
+    user_id: str = Field(
+        default="voice-ai-user",
+        min_length=1,
+        max_length=200,
+    )
+
+    session_id: str | None = Field(
+        default=None,
+        max_length=250,
+    )
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    agent: str
+    session_id: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    project_id: str
+    location: str
+    model: str
+
+
+TTS_MAX_RESPONSE_BYTES = int(
+    os.getenv(
+        "TTS_MAX_RESPONSE_BYTES",
+        "1800",
+    )
+)
+
+
+def limit_text_for_tts(
+    text: str,
+    max_bytes: int = TTS_MAX_RESPONSE_BYTES,
+) -> str:
+    """
+    Keep an answer inside the configured UTF-8 size limit.
+    """
+
+    clean_text = re.sub(
+        r"[ \t]+",
+        " ",
+        text,
+    ).strip()
+
+    clean_text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        clean_text,
+    )
+
+    if (
+        len(clean_text.encode("utf-8"))
+        <= max_bytes
+    ):
+        return clean_text
+
+    ending = (
+        "\n\nThe response was shortened "
+        "for voice playback."
+    )
+
+    selected_words: list[str] = []
+
+    for word in clean_text.split():
+        candidate = " ".join(
+            [
+                *selected_words,
+                word,
+            ]
+        )
+
+        candidate_with_ending = (
+            candidate + ending
+        )
+
+        if (
+            len(
+                candidate_with_ending.encode(
+                    "utf-8"
+                )
+            )
+            > max_bytes
+        ):
+            break
+
+        selected_words.append(
+            word
+        )
+
+    shortened_text = " ".join(
+        selected_words
+    ).rstrip(
+        " ,;:-"
+    )
+
+    last_sentence_end = max(
+        shortened_text.rfind("."),
+        shortened_text.rfind("?"),
+        shortened_text.rfind("!"),
+    )
+
+    if (
+        last_sentence_end
+        > len(shortened_text) * 0.6
+    ):
+        shortened_text = (
+            shortened_text[
+                : last_sentence_end + 1
+            ]
+        )
+
+    return shortened_text + ending
+
+
+@asynccontextmanager
+async def lifespan(
+    application: FastAPI,
+):
+    logger.info(
+        "Starting Voice AI Assistant backend."
+    )
+
+    yield
+
+    logger.info(
+        "Closing Voice AI Assistant backend."
+    )
+
+    await master_runtime.close()
+
 
 app = FastAPI(
-    title="Two-Agent RAG Backend",
+    title="Multi-Agent Voice AI API",
     version="1.0.0",
+
     description=(
-        "FastAPI backend containing a Master Assistant Agent "
-        "and a specialized RAG Agent."
+        "FastAPI backend for the Master Agent, "
+        "company-policy RAG, web search, "
+        "Speech-to-Text and Text-to-Speech."
     ),
+
+    lifespan=lifespan,
+)
+
+
+allowed_origins = list(
+    dict.fromkeys(
+        [
+            settings.frontend_origin,
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+    )
 )
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_origin,
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    ],
+
+    allow_origins=(
+        allowed_origins
+    ),
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(speech_router)
 
-# Runtime used by the main Master Agent.
-master_runtime = AgentRuntime(
-    agent=master_agent,
-    app_name="master_agent_application",
+# Adds:
+# POST /api/stt
+# POST /api/tts
+app.include_router(
+    speech_router
 )
 
 
-# Separate runtime for directly testing the RAG Agent.
-rag_runtime = AgentRuntime(
-    agent=rag_agent,
-    app_name="rag_agent_application",
+@app.get(
+    "/",
 )
-
-
-@app.get("/")
-async def root():
+def root() -> dict[str, str]:
     return {
-        "message": "Two-Agent RAG backend is working",
-        "main_endpoint": "/api/chat",
-        "rag_test_endpoint": "/api/rag",
-        "documentation": "/docs",
+        "message": (
+            "Multi-Agent Voice AI backend "
+            "is running."
+        ),
+        "docs": "/docs",
     }
 
 
@@ -90,45 +245,19 @@ async def root():
     "/health",
     response_model=HealthResponse,
 )
-async def health():
+def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        project_id=settings.project_id,
-        location=settings.location,
-        model=settings.model_id,
-        rag_corpus_configured=bool(
-            settings.rag_corpus
+        project_id=(
+            settings.project_id
         ),
-        available_agents=[
-            "master_agent",
-            "rag_agent",
-        ],
+        location=(
+            settings.location
+        ),
+        model=(
+            settings.model_id
+        ),
     )
-
-
-@app.get(
-    "/agents",
-    response_model=list[AgentDescription],
-)
-async def list_agents():
-    return [
-        AgentDescription(
-            name="master_agent",
-            role=(
-                "Primary assistant. It can call the "
-                "RAG Agent as a tool."
-            ),
-            endpoint="/api/chat",
-        ),
-        AgentDescription(
-            name="rag_agent",
-            role=(
-                "Document specialist. It answers using "
-                "the configured RAG corpus."
-            ),
-            endpoint="/api/rag",
-        ),
-    ]
 
 
 @app.post(
@@ -137,24 +266,23 @@ async def list_agents():
 )
 async def chat_with_master_agent(
     request: ChatRequest,
-):
-    """
-    Main endpoint.
-
-    The user talks to the Master Agent.
-    The Master Agent decides whether it needs the RAG Agent.
-    """
-
+) -> ChatResponse:
     session_id = (
         request.session_id
-        or uuid4().hex
+        or str(uuid.uuid4())
     )
 
     try:
         answer = await master_runtime.ask(
             question=request.question,
+
             user_id=request.user_id,
+
             session_id=session_id,
+        )
+
+        answer = limit_text_for_tts(
+            answer
         )
 
         return ChatResponse(
@@ -162,6 +290,12 @@ async def chat_with_master_agent(
             agent="master_agent",
             session_id=session_id,
         )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
 
     except Exception as error:
         logger.exception(
@@ -171,53 +305,7 @@ async def chat_with_master_agent(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Master Agent request failed: "
-                f"{error}"
-            ),
-        ) from error
-
-
-@app.post(
-    "/api/rag",
-    response_model=ChatResponse,
-)
-async def chat_directly_with_rag_agent(
-    request: ChatRequest,
-):
-    """
-    Testing endpoint.
-
-    This bypasses the Master Agent and talks directly
-    to the RAG Agent.
-    """
-
-    session_id = (
-        request.session_id
-        or uuid4().hex
-    )
-
-    try:
-        answer = await rag_runtime.ask(
-            question=request.question,
-            user_id=request.user_id,
-            session_id=session_id,
-        )
-
-        return ChatResponse(
-            answer=answer,
-            agent="rag_agent",
-            session_id=session_id,
-        )
-
-    except Exception as error:
-        logger.exception(
-            "RAG Agent request failed"
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "RAG Agent request failed: "
-                f"{error}"
+                "The assistant could not process "
+                "the request."
             ),
         ) from error

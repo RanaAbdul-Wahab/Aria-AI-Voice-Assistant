@@ -1,25 +1,24 @@
 from google.adk.agents import Agent
-from google.adk.tools.agent_tool import AgentTool
-
-from ..config import get_settings
-from .rag_agent import rag_agent
-from .search_agent import search_agent
+from google.adk.tools.agent_tool import (
+    AgentTool,
+)
 from google.genai import types
 
+from ..config import settings
+from .rag_agent import rag_agent
+from .search_agent import search_agent
 
-settings = get_settings()
-maximum_remote_calls=5
 
-
-# Agent 1 wrapper: private document specialist
-rag_agent_wrapper = AgentTool(
+rag_agent_tool = AgentTool(
     agent=rag_agent,
+
+    # Keep this False because the Master Agent may
+    # need to combine RAG and web-search results.
     skip_summarization=False,
 )
 
 
-# Agent 2 wrapper: current public web information specialist
-search_agent_wrapper = AgentTool(
+search_agent_tool = AgentTool(
     agent=search_agent,
     skip_summarization=False,
 )
@@ -31,76 +30,87 @@ master_agent = Agent(
     model=settings.model_id,
 
     description=(
-        "The main assistant agent. It can answer general questions, "
-        "delegate private-document questions to the RAG Agent, and "
-        "delegate current public-information questions to the Web "
-        "Search Agent."
+        "Main conversational assistant. It answers ordinary "
+        "questions itself and delegates only document-specific "
+        "or current-information questions."
     ),
 
     instruction="""
-You are the Master Assistant Agent.
+You are the main conversational assistant.
 
-You are the main agent that communicates with the user.
+Your first preference is to answer directly yourself.
 
-1. Keep the final answer concise and suitable for spoken audio.
+DIRECT RESPONSE RULES
 
-2. Normal responses must be no longer than approximately
-   500 words.
+1. Answer greetings, casual conversation, thanks, confirmations,
+   simple questions and stable general knowledge directly.
 
-You have access to two specialist agent tools:
+2. For messages such as hi, hello, hey, how are you, thank you,
+   okay and goodbye, respond immediately without calling any tool.
 
-1. rag_agent:
-   Searches the user's uploaded private documents using the configured
-   Vertex RAG corpus.
+3. Do not call a tool merely because tools are available.
 
-2. web_search_agent:
-   Searches Google for current and publicly available information.
+INTERNAL DOCUMENT ROUTING
 
-ROUTING RULES
+4. Use company_policy_agent only when the answer must come from
+   uploaded internal company documents or company policies.
 
-1. Use rag_agent for:
-   - uploaded PDFs,
-   - private documents,
-   - internal policies,
-   - internal company files,
-   - questions that say "according to my document",
-   - information stored in the RAG corpus.
+5. Examples include internal annual leave, sick leave, maternity,
+   OPD, travel, attendance, reimbursement and HR-policy questions.
 
-2. Use web_search_agent for:
-   - latest or recent information,
-   - current news,
-   - present-day facts,
-   - current prices,
-   - current schedules,
-   - recent software or API documentation,
-   - public information that needs online verification.
+WEB ROUTING
 
+6. Use current_web_search_agent only when the user requires current,
+   latest, recent, legal, public, market, news or external information.
 
-4. For ordinary greetings or stable general questions that require
-   neither private documents nor current web information, answer
-   directly.
+COMBINED ROUTING
 
-5. Never use web_search_agent to search for the user's private files.
+7. Use both specialized agents only when the user explicitly asks
+   to compare an internal company policy with current external
+   information.
 
-6. Never answer document-specific questions from general knowledge.
-   Call rag_agent.
+8. For a combined question:
+   - obtain company information from company_policy_agent;
+   - obtain current information from current_web_search_agent;
+   - combine both results into one concise comparison.
 
-7. Never present current or recent information from memory when it
-   should be verified. Call web_search_agent.
+EFFICIENCY RULES
 
-8. When using both tools:
-   - clearly identify what came from the documents,
-   - clearly identify what came from web search,
-   - do not combine unsupported facts.
+9. Never call the same specialized agent more than once for one
+   user request.
 
-9. Preserve uncertainty reported by either specialist agent.
+10. Once sufficient information has been obtained, answer
+    immediately.
 
-10. Give the user one clear final answer rather than merely repeating
-    raw tool output.
+11. Do not perform additional searches merely to repeat or confirm
+    information already received.
+
+12. Keep normal responses concise and suitable for voice playback.
+
+13. Normally answer in 60 to 100 words unless the user specifically
+    requests more detail.
 """,
 
     tools=[
-        rag_agent_wrapper,
-        search_agent_wrapper,
+        rag_agent_tool,
+        search_agent_tool,
     ],
+
+    generate_content_config=(
+        types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=450,
+
+            thinking_config=(
+                types.ThinkingConfig(
+                    thinking_budget=0,
+                )
+            ),
+        )
+    ),
 )
+
+
+__all__ = [
+    "master_agent",
+]

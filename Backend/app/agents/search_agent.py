@@ -1,67 +1,63 @@
 from google.adk.agents import Agent
 from google.adk.tools import google_search
-
-from ..config import get_settings
-
-
-settings = get_settings()
 from google.genai import types
+
+from ..config import settings
 
 
 search_agent = Agent(
-    name="web_search_agent",
+    name="current_web_search_agent",
 
     model=settings.model_id,
 
     description=(
-        "A specialist web-search agent that searches Google for "
-        "current, recent, public and externally verifiable information."
+        "Searches the public web only when current, latest, recent, "
+        "legal, market, news or external public information is "
+        "required. It must not handle greetings or internal company "
+        "policy questions."
     ),
 
     instruction="""
-You are the Web Search Agent.
+You are the current public-information specialist.
 
-Your responsibility is to answer questions that require current,
-recent or publicly available internet information.
+RULES
 
-Rules:
+1. Use Google Search only when the question requires information
+   that is current, latest, recent, legal, public, external, market
+   related or news related.
 
-1. Use Google Search whenever the user's question depends on:
-   - current information,
-   - recent events,
-   - latest developments,
-   - current people or office holders,
-   - recent software documentation,
-   - current prices, schedules or regulations,
-   - facts that need external verification.
+2. Do not answer questions about internal company policy documents.
 
-2. Base your answer on the Google Search results.
+3. Use reliable and relevant public sources.
 
-3. Clearly distinguish verified facts from your own interpretation.
+4. Do not perform repeated searches for the same information.
 
-4. Include source attribution supplied by Google Search.
+5. Mention when information is uncertain or varies by jurisdiction.
 
-5. Do not claim that information came from the user's private
-   documents.
+6. Keep the final answer concise and suitable for voice playback.
 
-6. Do not use this tool for questions about uploaded PDFs or private
-   internal documents. Those belong to the RAG Agent.
-
-7. If reliable information cannot be found, say that clearly.
-
-8. Give the Master Agent a complete, concise and well-supported answer.
+7. Normally respond in no more than 100 words.
 """,
 
-    # Google Search should remain the Search Agent's only tool.
     tools=[
         google_search,
     ],
 
-    generate_content_config=types.GenerateContentConfig(
-        automatic_function_calling=(
-            types.AutomaticFunctionCallingConfig(
-                maximum_remote_calls=5,
-            )
-        ),
+    generate_content_config=(
+        types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=400,
+
+            thinking_config=(
+                types.ThinkingConfig(
+                    thinking_budget=0,
+                )
+            ),
+        )
     ),
 )
+
+
+__all__ = [
+    "search_agent",
+]

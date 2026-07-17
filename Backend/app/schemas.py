@@ -3,33 +3,44 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     question: str = Field(
-        min_length=2,
+        min_length=1,
         max_length=5000,
-        description="The user's message or question.",
     )
 
     user_id: str = Field(
-        default="web-user",
+        default="voice-ai-user",
         min_length=1,
-        max_length=100,
-        description="Identifier for the current user.",
+        max_length=200,
     )
 
     session_id: str | None = Field(
         default=None,
-        min_length=1,
-        max_length=150,
-        description=(
-            "Reuse the returned session_id to continue "
-            "the same conversation."
-        ),
+        max_length=250,
     )
 
 
 class ChatResponse(BaseModel):
     answer: str
-    agent: str
+    agent: str = "master_agent"
     session_id: str
+
+
+class TextToSpeechRequest(BaseModel):
+    text: str = Field(
+        min_length=1,
+        max_length=5000,
+    )
+
+    language_code: str = Field(
+        default="en-IN",
+        min_length=2,
+        max_length=20,
+    )
+
+
+class SpeechToTextResponse(BaseModel):
+    transcript: str
+    language_code: str
 
 
 class HealthResponse(BaseModel):
@@ -37,11 +48,3 @@ class HealthResponse(BaseModel):
     project_id: str
     location: str
     model: str
-    rag_corpus_configured: bool
-    available_agents: list[str]
-
-
-class AgentDescription(BaseModel):
-    name: str
-    role: str
-    endpoint: str

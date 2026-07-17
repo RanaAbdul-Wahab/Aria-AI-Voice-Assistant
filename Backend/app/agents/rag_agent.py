@@ -1,124 +1,113 @@
-from google import genai
-from google.genai import types as genai_types
+import logging
+
+import vertexai
 from google.adk.agents import Agent
-
-from ..config import get_settings
+from google.adk.tools.retrieval.vertex_ai_rag_retrieval import (
+    VertexAiRagRetrieval,
+)
 from google.genai import types
+from vertexai.preview import rag
+
+from ..config import settings
 
 
-settings = get_settings()
-maximum_remote_calls=5
+logger = logging.getLogger(__name__)
 
-# Gemini client used by our existing VertexRagStore code.
-genai_client = genai.Client(
-    enterprise=True,
+
+vertexai.init(
     project=settings.project_id,
     location=settings.location,
 )
 
 
-def search_uploaded_documents(question: str) -> dict[str, str]:
-    """
-    Search the configured RAG corpus and answer from uploaded documents.
+company_policy_retrieval = VertexAiRagRetrieval(
+    name="retrieve_company_policy_documents",
 
-    Args:
-        question: Complete question to answer using the uploaded documents.
-
-    Returns:
-        A dictionary containing the document-grounded answer.
-    """
-
-    clean_question = question.strip()
-
-    if not clean_question:
-        return {
-            "status": "error",
-            "answer": "The question cannot be empty.",
-        }
-
-    try:
-        rag_retrieval_config = genai_types.RagRetrievalConfig(
-            top_k=settings.rag_top_k,
-            filter=genai_types.RagRetrievalConfigFilter(
-                vector_distance_threshold=(
-                    settings.rag_distance_threshold
-                )
-            ),
-        )
-
-        # This is your previous VertexRagStore implementation.
-        rag_retrieval_tool = genai_types.Tool(
-            retrieval=genai_types.Retrieval(
-                vertex_rag_store=genai_types.VertexRagStore(
-                    rag_resources=[
-                        genai_types.VertexRagStoreRagResource(
-                            rag_corpus=settings.rag_corpus,
-                        )
-                    ],
-                    rag_retrieval_config=rag_retrieval_config,
-                )
-            )
-        )
-
-        response = genai_client.models.generate_content(
-            model=settings.model_id,
-            contents=clean_question,
-            config=genai_types.GenerateContentConfig(
-                tools=[rag_retrieval_tool],
-
-                system_instruction=(
-                    "Answer only from the retrieved uploaded documents. "
-                    "Do not invent information. If the documents do not "
-                    "contain enough information, clearly say so."
-                ),
-                temperature=0.1,
-                max_output_tokens=1500,
-            ),
-        )
-
-        if not response.text:
-            return {
-                "status": "error",
-                "answer": "The RAG search returned an empty response.",
-            }
-
-        return {
-            "status": "success",
-            "answer": response.text.strip(),
-        }
-
-    except Exception as error:
-        return {
-            "status": "error",
-            "answer": (
-                "The RAG Agent could not retrieve an answer "
-                "from the uploaded documents."
-            ),
-            "error": str(error),
-        }
-
-
-# Agent 1
-rag_agent = Agent(
-    name="rag_agent",
-    model=settings.model_id,
     description=(
-        "A specialist agent that answers questions using "
-        "the uploaded private documents."
+        "Retrieve passages only from uploaded internal company "
+        "documents and company policies. Use this only for internal "
+        "leave, maternity, sick leave, annual leave, OPD, travel, "
+        "attendance, reimbursement, HR or other company-policy "
+        "questions. Do not use it for greetings, casual conversation, "
+        "general knowledge, news or public web information."
     ),
-    instruction="""
-You are the RAG Agent.
 
-Always call the search_uploaded_documents tool before answering.
-
-Use only the information returned by the tool.
-
-Do not use general knowledge to add unsupported facts.
-
-If the tool cannot find sufficient information, clearly tell the user
-that the uploaded documents do not contain enough information.
-""",
-    tools=[
-        search_uploaded_documents,
+    rag_resources=[
+        rag.RagResource(
+            rag_corpus=(
+                settings.rag_corpus_name
+            ),
+        ),
     ],
+
+    similarity_top_k=(
+        settings.rag_top_k
+    ),
+
+    vector_distance_threshold=(
+        settings.rag_distance_threshold
+    ),
 )
+
+
+rag_agent = Agent(
+    name="company_policy_agent",
+
+    model=settings.model_id,
+
+    description=(
+        "Answers only questions requiring uploaded internal company "
+        "policy documents. It must not handle greetings, casual chat, "
+        "general knowledge or current public information."
+    ),
+
+    instruction="""
+You are the internal company-policy specialist.
+
+You receive questions that specifically require uploaded internal
+company documents.
+
+RULES
+
+1. Use retrieve_company_policy_documents for the user's question.
+
+2. Base your answer only on information retrieved from the uploaded
+   documents.
+
+3. Do not use general knowledge to invent company rules.
+
+4. If the retrieved passages do not contain the answer, clearly say
+   that the information was not found in the uploaded documents.
+
+5. Mention the relevant policy name when it is available.
+
+6. Do not call the retrieval tool repeatedly for the same question.
+
+7. Keep the answer concise, clear and suitable for spoken audio.
+
+8. Normally respond in no more than 100 words.
+""",
+
+    tools=[
+        company_policy_retrieval,
+    ],
+
+    generate_content_config=(
+        types.GenerateContentConfig(
+            temperature=0.0,
+            max_output_tokens=400,
+
+            # Reduces latency for Gemini 2.5 Flash.
+            thinking_config=(
+                types.ThinkingConfig(
+                    thinking_budget=0,
+                )
+            ),
+        )
+    ),
+)
+
+
+__all__ = [
+    "rag_agent",
+]

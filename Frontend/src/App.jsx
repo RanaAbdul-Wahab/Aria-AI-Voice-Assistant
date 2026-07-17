@@ -16,14 +16,20 @@ import "./App.css";
 
 const USER_ID = "abdul-wahab";
 
-const MAX_RECORDING_DURATION_MS =
-  55_000;
+/*
+ * Voice-call tuning.
+ *
+ * Increase SILENCE_DURATION_MS if the call
+ * interrupts you during short pauses.
+ */
+const SILENCE_DURATION_MS = 1300;
+const MIN_RECORDING_DURATION_MS = 700;
+const MAX_RECORDING_DURATION_MS = 50_000;
+const SPEECH_THRESHOLD = 0.018;
 
 
 function createId() {
-  if (
-    globalThis.crypto?.randomUUID
-  ) {
+  if (globalThis.crypto?.randomUUID) {
     return globalThis.crypto.randomUUID();
   }
 
@@ -31,29 +37,26 @@ function createId() {
 }
 
 
-function createAssistantMessage(
-  text,
-  additionalFields = {}
-) {
+function getCurrentTime() {
+  return new Intl.DateTimeFormat([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
+}
+
+
+function createMessage(role, text) {
   return {
     id: createId(),
-    role: "assistant",
+    role,
     text,
-    agent: "",
-
-    audioUrl: "",
-    audioStatus: "idle",
-    audioError: "",
-
-    ...additionalFields,
+    createdAt: getCurrentTime(),
   };
 }
 
 
-function getSupportedRecordingType() {
-  if (
-    typeof MediaRecorder === "undefined"
-  ) {
+function getRecordingMimeType() {
+  if (typeof MediaRecorder === "undefined") {
     return "";
   }
 
@@ -65,9 +68,37 @@ function getSupportedRecordingType() {
 
   return (
     candidates.find((type) =>
-      MediaRecorder.isTypeSupported(type)
+      MediaRecorder.isTypeSupported(type),
     ) || ""
   );
+}
+
+
+function formatDuration(totalSeconds) {
+  const minutes = Math.floor(
+    totalSeconds / 60,
+  );
+
+  const seconds =
+    totalSeconds % 60;
+
+  return `${String(minutes).padStart(
+    2,
+    "0",
+  )}:${String(seconds).padStart(
+    2,
+    "0",
+  )}`;
+}
+
+
+function delay(milliseconds) {
+  return new Promise((resolve) => {
+    window.setTimeout(
+      resolve,
+      milliseconds,
+    );
+  });
 }
 
 
@@ -77,94 +108,116 @@ function App() {
 
   const [messages, setMessages] =
     useState([
-      createAssistantMessage(
-        "Hello! You can type a question or record your voice."
+      createMessage(
+        "assistant",
+        "Hello! Type a message or start a voice call.",
       ),
     ]);
 
-  const [sessionId, setSessionId] =
-    useState(() => {
-      return (
-        localStorage.getItem(
-          "agent_session_id"
-        ) || ""
-      );
-    });
+  /*
+   * This session belongs only to text chat.
+   */
+  const [
+    textSessionId,
+    setTextSessionId,
+  ] = useState(() => {
+    return (
+      localStorage.getItem(
+        "text_chat_session_id",
+      ) || ""
+    );
+  });
 
   const [
     backendStatus,
     setBackendStatus,
   ] = useState("checking");
 
-  const [languageCode, setLanguageCode] =
-    useState("en-IN");
-
-  const [isLoading, setIsLoading] =
-    useState(false);
-
-  const [isRecording, setIsRecording] =
-    useState(false);
+  const [
+    languageCode,
+    setLanguageCode,
+  ] = useState("en-IN");
 
   const [
-    isTranscribing,
-    setIsTranscribing,
+    isTextLoading,
+    setIsTextLoading,
   ] = useState(false);
-
-  const [isSpeaking, setIsSpeaking] =
-    useState(false);
-
-  const [autoSpeak, setAutoSpeak] =
-    useState(true);
 
   const [error, setError] =
     useState("");
+
+  /*
+   * Voice-call state.
+   */
+  const [callOpen, setCallOpen] =
+    useState(false);
+
+  const [callPhase, setCallPhase] =
+    useState("idle");
+
+  const [callError, setCallError] =
+    useState("");
+
+  const [
+    callDuration,
+    setCallDuration,
+  ] = useState(0);
 
   const [microphoneSupported] =
     useState(() => {
       return Boolean(
         navigator.mediaDevices
           ?.getUserMedia &&
-        typeof MediaRecorder !==
-          "undefined"
+          typeof MediaRecorder !==
+            "undefined",
       );
     });
 
 
-  const mediaRecorderRef =
+  /*
+   * Text-chat references.
+   */
+  const messagesEndRef =
     useRef(null);
+
+
+  /*
+   * Voice-call references.
+   */
+  const callActiveRef =
+    useRef(false);
+
+  const callTokenRef =
+    useRef(0);
+
+  const voiceSessionIdRef =
+    useRef("");
 
   const mediaStreamRef =
     useRef(null);
 
-  const audioChunksRef =
-    useRef([]);
+  const recorderRef =
+    useRef(null);
+
+  const discardRecordingRef =
+    useRef(false);
+
+  const analyserRef =
+    useRef(null);
+
+  const analyserSourceRef =
+    useRef(null);
+
+  const silenceFrameRef =
+    useRef(null);
 
   const recordingTimeoutRef =
     useRef(null);
 
-  const typedTextBeforeRecordingRef =
-    useRef("");
-
-  const audioElementRef =
+  const audioContextRef =
     useRef(null);
 
-  /*
-   * Every generated object URL is stored here.
-   * This allows audio to be reused without another
-   * TTS request and released later.
-   */
-  const generatedAudioUrlsRef =
-    useRef(new Set());
-
-  /*
-   * Incrementing this value invalidates any old
-   * background TTS requests after a new chat or
-   * language change.
-   */
-  const audioGenerationVersionRef =
-    useRef(0);
-
-  const messagesEndRef =
+  const audioSourceRef =
     useRef(null);
 
 
@@ -174,16 +227,16 @@ function App() {
         await checkBackendHealth();
 
         setBackendStatus(
-          "connected"
+          "connected",
         );
       } catch {
         setBackendStatus(
-          "disconnected"
+          "disconnected",
         );
       }
     }
 
-    testBackend();
+    void testBackend();
   }, []);
 
 
@@ -191,291 +244,423 @@ function App() {
     messagesEndRef.current
       ?.scrollIntoView({
         behavior: "smooth",
+        block: "end",
       });
   }, [
     messages,
-    isLoading,
-    isTranscribing,
+    isTextLoading,
   ]);
 
 
+  /*
+   * Voice-call timer.
+   */
+  useEffect(() => {
+    if (!callOpen) {
+      setCallDuration(0);
+      return undefined;
+    }
+
+    const startedAt = Date.now();
+
+    const timer = window.setInterval(
+      () => {
+        const elapsedSeconds =
+          Math.floor(
+            (
+              Date.now() -
+              startedAt
+            ) / 1000,
+          );
+
+        setCallDuration(
+          elapsedSeconds,
+        );
+      },
+      1000,
+    );
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [callOpen]);
+
+
+  /*
+   * Cleanup when React unmounts.
+   */
   useEffect(() => {
     return () => {
-      if (
-        recordingTimeoutRef.current
-      ) {
-        clearTimeout(
-          recordingTimeoutRef.current
-        );
-      }
+      callActiveRef.current =
+        false;
+
+      callTokenRef.current += 1;
+
+      cleanupRecordingDetection();
+      stopAssistantAudio();
+      stopMicrophoneStream();
 
       if (
-        mediaStreamRef.current
+        audioContextRef.current
       ) {
-        mediaStreamRef.current
-          .getTracks()
-          .forEach((track) => {
-            track.stop();
-          });
+        void audioContextRef
+          .current
+          .close();
       }
-
-      const audio =
-        audioElementRef.current;
-
-      if (audio) {
-        audio.pause();
-        audio.currentTime = 0;
-      }
-
-      for (
-        const audioUrl
-        of generatedAudioUrlsRef.current
-      ) {
-        URL.revokeObjectURL(
-          audioUrl
-        );
-      }
-
-      generatedAudioUrlsRef.current.clear();
     };
   }, []);
 
 
-  function clearRecordingTimeout() {
-    if (
-      !recordingTimeoutRef.current
-    ) {
-      return;
+  function getAudioContext() {
+    if (audioContextRef.current) {
+      return audioContextRef.current;
     }
 
-    clearTimeout(
-      recordingTimeoutRef.current
-    );
+    const AudioContextClass =
+      window.AudioContext ||
+      window.webkitAudioContext;
 
-    recordingTimeoutRef.current =
-      null;
+    if (!AudioContextClass) {
+      throw new Error(
+        "Audio playback is not supported in this browser.",
+      );
+    }
+
+    audioContextRef.current =
+      new AudioContextClass();
+
+    return audioContextRef.current;
   }
 
 
-  function stopMediaTracks() {
-    if (!mediaStreamRef.current) {
-      return;
+  async function unlockAudio() {
+    const audioContext =
+      getAudioContext();
+
+    if (
+      audioContext.state ===
+      "suspended"
+    ) {
+      await audioContext.resume();
+    }
+  }
+
+
+  function isCallActive(token) {
+    return (
+      callActiveRef.current &&
+      callTokenRef.current === token
+    );
+  }
+
+
+  function enableMicrophoneTracks(
+    enabled,
+  ) {
+    mediaStreamRef.current
+      ?.getAudioTracks()
+      .forEach((track) => {
+        track.enabled = enabled;
+      });
+  }
+
+
+  function cleanupRecordingDetection() {
+    if (silenceFrameRef.current) {
+      window.cancelAnimationFrame(
+        silenceFrameRef.current,
+      );
+
+      silenceFrameRef.current =
+        null;
     }
 
+    if (
+      recordingTimeoutRef.current
+    ) {
+      window.clearTimeout(
+        recordingTimeoutRef.current,
+      );
+
+      recordingTimeoutRef.current =
+        null;
+    }
+  }
+
+
+  function stopMicrophoneStream() {
+    cleanupRecordingDetection();
+
+    if (
+      analyserSourceRef.current
+    ) {
+      try {
+        analyserSourceRef.current
+          .disconnect();
+      } catch {
+        // Source may already be disconnected.
+      }
+    }
+
+    analyserSourceRef.current =
+      null;
+
+    analyserRef.current =
+      null;
+
     mediaStreamRef.current
-      .getTracks()
+      ?.getTracks()
       .forEach((track) => {
         track.stop();
       });
 
-    mediaStreamRef.current = null;
+    mediaStreamRef.current =
+      null;
   }
 
 
-  function updateMessageAudio(
-    messageId,
-    updates
-  ) {
-    setMessages(
-      (currentMessages) =>
-        currentMessages.map(
-          (message) =>
-            message.id === messageId
-              ? {
-                  ...message,
-                  ...updates,
-                }
-              : message
-        )
-    );
-  }
+  function stopAssistantAudio() {
+    const source =
+      audioSourceRef.current;
 
-
-  function stopSpeaking() {
-    const audio =
-      audioElementRef.current;
-
-    if (audio) {
-      audio.pause();
-      audio.currentTime = 0;
-    }
-
-    audioElementRef.current = null;
-
-    setIsSpeaking(false);
-  }
-
-
-  function cleanupGeneratedAudio() {
-    stopSpeaking();
-
-    for (
-      const audioUrl
-      of generatedAudioUrlsRef.current
-    ) {
-      URL.revokeObjectURL(
-        audioUrl
-      );
-    }
-
-    generatedAudioUrlsRef.current.clear();
-  }
-
-
-  async function playPreparedAudio(
-    audioUrl
-  ) {
-    if (!audioUrl) {
-      return;
-    }
-
-    stopSpeaking();
-
-    const audio =
-      new Audio(audioUrl);
-
-    audioElementRef.current =
-      audio;
-
-    audio.onplay = () => {
-      setIsSpeaking(true);
-      setError("");
-    };
-
-    audio.onended = () => {
-      setIsSpeaking(false);
-      audioElementRef.current = null;
-    };
-
-    audio.onerror = () => {
-      setIsSpeaking(false);
-      audioElementRef.current = null;
-
-      setError(
-        "The generated audio could not be played."
-      );
-    };
-
-    try {
-      await audio.play();
-    } catch {
-      setIsSpeaking(false);
-      audioElementRef.current = null;
-
-      setError(
-        "The browser blocked automatic playback. Press the Speak button."
-      );
-    }
-  }
-
-
-  async function prepareMessageAudio({
-    messageId,
-    text,
-    shouldAutoPlay = false,
-  }) {
-    const cleanText =
-      text?.trim();
-
-    if (!cleanText) {
-      return;
-    }
-
-    const requestVersion =
-      audioGenerationVersionRef.current;
-
-    updateMessageAudio(
-      messageId,
-      {
-        audioStatus: "loading",
-        audioError: "",
+    if (source) {
+      try {
+        source.stop();
+      } catch {
+        // Audio may already have ended.
       }
+    }
+
+    audioSourceRef.current =
+      null;
+  }
+
+
+  async function playAssistantAudio(
+    audioBlob,
+    token,
+  ) {
+    if (!isCallActive(token)) {
+      return;
+    }
+
+    const audioContext =
+      getAudioContext();
+
+    if (
+      audioContext.state ===
+      "suspended"
+    ) {
+      await audioContext.resume();
+    }
+
+    const audioArrayBuffer =
+      await audioBlob.arrayBuffer();
+
+    const audioBuffer =
+      await audioContext
+        .decodeAudioData(
+          audioArrayBuffer.slice(0),
+        );
+
+    if (!isCallActive(token)) {
+      return;
+    }
+
+    stopAssistantAudio();
+
+    const source =
+      audioContext
+        .createBufferSource();
+
+    source.buffer = audioBuffer;
+
+    source.connect(
+      audioContext.destination,
     );
 
+    audioSourceRef.current =
+      source;
+
+    setCallPhase("speaking");
+
+    await new Promise((resolve) => {
+      source.onended = () => {
+        if (
+          audioSourceRef.current ===
+          source
+        ) {
+          audioSourceRef.current =
+            null;
+        }
+
+        resolve();
+      };
+
+      source.start(0);
+    });
+  }
+
+
+  function saveTextSession(
+    sessionId,
+  ) {
+    if (!sessionId) {
+      return;
+    }
+
+    setTextSessionId(sessionId);
+
+    localStorage.setItem(
+      "text_chat_session_id",
+      sessionId,
+    );
+  }
+
+
+  /*
+   * Standard text-chat submission.
+   *
+   * This calls /api/chat only.
+   * It never calls /api/tts.
+   */
+  async function handleTextSubmit(
+    event,
+  ) {
+    event.preventDefault();
+
+    const cleanQuestion =
+      question.trim();
+
+    if (
+      !cleanQuestion ||
+      isTextLoading ||
+      callOpen
+    ) {
+      return;
+    }
+
+    setError("");
+
+    setMessages(
+      (currentMessages) => [
+        ...currentMessages,
+        createMessage(
+          "user",
+          cleanQuestion,
+        ),
+      ],
+    );
+
+    setQuestion("");
+    setIsTextLoading(true);
+
     try {
-      const audioBlob =
-        await synthesizeSpeech({
-          text: cleanText,
-          languageCode,
+      const result =
+        await sendMessage({
+          question: cleanQuestion,
+          userId: USER_ID,
+          sessionId:
+            textSessionId,
         });
 
-      /*
-       * Ignore responses from an older chat
-       * or an older language selection.
-       */
-      if (
-        requestVersion !==
-        audioGenerationVersionRef.current
-      ) {
-        return;
-      }
-
-      const audioUrl =
-        URL.createObjectURL(
-          audioBlob
-        );
-
-      generatedAudioUrlsRef.current.add(
-        audioUrl
+      saveTextSession(
+        result.session_id,
       );
 
-      updateMessageAudio(
-        messageId,
-        {
-          audioUrl,
-          audioStatus: "ready",
-          audioError: "",
-        }
+      setBackendStatus(
+        "connected",
       );
 
-      if (shouldAutoPlay) {
-        await playPreparedAudio(
-          audioUrl
-        );
-      }
-    } catch (speechError) {
-      if (
-        requestVersion !==
-        audioGenerationVersionRef.current
-      ) {
-        return;
-      }
-
-      updateMessageAudio(
-        messageId,
-        {
-          audioUrl: "",
-          audioStatus: "error",
-          audioError:
-            speechError.message ||
-            "Audio generation failed.",
-        }
+      setMessages(
+        (currentMessages) => [
+          ...currentMessages,
+          createMessage(
+            "assistant",
+            result.answer,
+          ),
+        ],
       );
+    } catch (requestError) {
+      setBackendStatus(
+        "disconnected",
+      );
+
+      setError(
+        requestError.message ||
+          "The message could not be sent.",
+      );
+    } finally {
+      setIsTextLoading(false);
     }
   }
 
 
-  async function startRecording() {
+  function handleTextKeyDown(
+    event,
+  ) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey
+    ) {
+      event.preventDefault();
+
+      if (
+        question.trim() &&
+        !isTextLoading
+      ) {
+        event.currentTarget
+          .form
+          .requestSubmit();
+      }
+    }
+  }
+
+
+  /*
+   * Open the full-screen voice call.
+   */
+  async function beginVoiceCall() {
     if (!microphoneSupported) {
       setError(
-        "Microphone recording is not supported in this browser."
+        "Microphone recording is not supported in this browser.",
       );
 
       return;
     }
 
     if (
-      isRecording ||
-      isTranscribing ||
-      isLoading
+      isTextLoading ||
+      callOpen
     ) {
       return;
     }
 
-    stopSpeaking();
     setError("");
+    setCallError("");
+    setCallPhase("connecting");
+
+    const token =
+      callTokenRef.current + 1;
+
+    callTokenRef.current =
+      token;
+
+    callActiveRef.current =
+      true;
+
+    voiceSessionIdRef.current =
+      "";
+
+    setCallOpen(true);
 
     try {
+      /*
+       * Unlock automatic audio playback while
+       * handling the user's microphone click.
+       */
+      await unlockAudio();
+
       const stream =
         await navigator.mediaDevices
           .getUserMedia({
@@ -487,74 +672,62 @@ function App() {
             },
           });
 
+      if (!isCallActive(token)) {
+        stream
+          .getTracks()
+          .forEach((track) => {
+            track.stop();
+          });
+
+        return;
+      }
+
       mediaStreamRef.current =
         stream;
 
-      audioChunksRef.current = [];
+      const audioContext =
+        getAudioContext();
 
-      typedTextBeforeRecordingRef.current =
-        question.trim();
-
-      const mimeType =
-        getSupportedRecordingType();
-
-      const recorder = mimeType
-        ? new MediaRecorder(
+      const source =
+        audioContext
+          .createMediaStreamSource(
             stream,
-            {
-              mimeType,
-              audioBitsPerSecond:
-                128000,
-            }
-          )
-        : new MediaRecorder(
-            stream
           );
 
-      mediaRecorderRef.current =
-        recorder;
+      const analyser =
+        audioContext
+          .createAnalyser();
 
-      recorder.ondataavailable = (
-        event
-      ) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(
-            event.data
-          );
-        }
-      };
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant =
+        0.25;
 
-      recorder.onerror = () => {
-        clearRecordingTimeout();
-        stopMediaTracks();
+      source.connect(analyser);
 
-        setIsRecording(false);
+      analyserSourceRef.current =
+        source;
 
-        setError(
-          "The browser could not record microphone audio."
-        );
-      };
+      analyserRef.current =
+        analyser;
 
-      recorder.onstop =
-        handleRecordingStopped;
-
-      recorder.start(250);
-
-      setIsRecording(true);
-
-      recordingTimeoutRef.current =
-        window.setTimeout(() => {
-          stopRecording();
-        }, MAX_RECORDING_DURATION_MS);
+      await startRecordingCycle(
+        token,
+      );
     } catch (recordingError) {
-      stopMediaTracks();
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      stopMicrophoneStream();
+
+      setCallPhase("error");
 
       if (
         recordingError.name ===
         "NotAllowedError"
       ) {
-        setError(
-          "Microphone permission was denied. Allow microphone access in the browser."
+        setCallError(
+          "Microphone permission was denied. Allow microphone access and try again.",
         );
 
         return;
@@ -564,413 +737,668 @@ function App() {
         recordingError.name ===
         "NotFoundError"
       ) {
-        setError(
-          "No microphone was found."
+        setCallError(
+          "No microphone was found.",
         );
 
         return;
       }
 
-      setError(
-        `Could not start recording: ${recordingError.message}`
+      setCallError(
+        recordingError.message ||
+          "The voice call could not be started.",
       );
     }
   }
 
 
-  function stopRecording() {
-    clearRecordingTimeout();
-
-    const recorder =
-      mediaRecorderRef.current;
-
-    if (
-      recorder &&
-      recorder.state !== "inactive"
-    ) {
-      recorder.stop();
+  /*
+   * Begin one automatic listening turn.
+   *
+   * Recording stops when silence is detected.
+   */
+  async function startRecordingCycle(
+    token,
+  ) {
+    if (!isCallActive(token)) {
+      return;
     }
 
-    setIsRecording(false);
-  }
+    const stream =
+      mediaStreamRef.current;
 
+    const analyser =
+      analyserRef.current;
 
-  async function handleRecordingStopped() {
-    clearRecordingTimeout();
+    if (!stream || !analyser) {
+      setCallPhase("error");
 
-    setIsRecording(false);
-
-    const recorder =
-      mediaRecorderRef.current;
-
-    const mimeType =
-      recorder?.mimeType ||
-      "audio/webm";
-
-    const audioBlob =
-      new Blob(
-        audioChunksRef.current,
-        {
-          type: mimeType,
-        }
-      );
-
-    audioChunksRef.current = [];
-
-    mediaRecorderRef.current =
-      null;
-
-    stopMediaTracks();
-
-    if (!audioBlob.size) {
-      setError(
-        "No audio was recorded."
+      setCallError(
+        "The microphone connection was lost.",
       );
 
       return;
     }
 
-    setIsTranscribing(true);
-    setError("");
+    cleanupRecordingDetection();
 
+    setCallError("");
+    setCallPhase("listening");
+
+    enableMicrophoneTracks(true);
+
+    discardRecordingRef.current =
+      false;
+
+    const mimeType =
+      getRecordingMimeType();
+
+    const recorder = mimeType
+      ? new MediaRecorder(
+          stream,
+          {
+            mimeType,
+            audioBitsPerSecond:
+              128000,
+          },
+        )
+      : new MediaRecorder(stream);
+
+    recorderRef.current =
+      recorder;
+
+    const chunks = [];
+
+    let heardSpeech = false;
+    let silenceStartedAt = null;
+
+    const recordingStartedAt =
+      performance.now();
+
+    recorder.ondataavailable = (
+      event,
+    ) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
+
+    recorder.onerror = () => {
+      cleanupRecordingDetection();
+
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      setCallPhase("error");
+
+      setCallError(
+        "Microphone recording failed.",
+      );
+    };
+
+    recorder.onstop = () => {
+      cleanupRecordingDetection();
+
+      enableMicrophoneTracks(false);
+
+      recorderRef.current =
+        null;
+
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      const shouldDiscard =
+        discardRecordingRef.current;
+
+      discardRecordingRef.current =
+        false;
+
+      const audioBlob =
+        new Blob(chunks, {
+          type:
+            recorder.mimeType ||
+            "audio/webm",
+        });
+
+      if (
+        shouldDiscard ||
+        !heardSpeech ||
+        !audioBlob.size
+      ) {
+        window.setTimeout(
+          () => {
+            void startRecordingCycle(
+              token,
+            );
+          },
+          250,
+        );
+
+        return;
+      }
+
+      void processVoiceTurn(
+        audioBlob,
+        token,
+      );
+    };
+
+    recorder.start(250);
+
+    const audioData =
+      new Uint8Array(
+        analyser.fftSize,
+      );
+
+    function finishCurrentTurn() {
+      if (
+        recorder.state !==
+        "recording"
+      ) {
+        return;
+      }
+
+      cleanupRecordingDetection();
+
+      setCallPhase(
+        "transcribing",
+      );
+
+      recorder.stop();
+    }
+
+
+    function monitorSilence() {
+      if (
+        !isCallActive(token) ||
+        recorder.state !==
+          "recording"
+      ) {
+        return;
+      }
+
+      analyser
+        .getByteTimeDomainData(
+          audioData,
+        );
+
+      let sumSquares = 0;
+
+      for (
+        let index = 0;
+        index < audioData.length;
+        index += 1
+      ) {
+        const normalizedSample =
+          (
+            audioData[index] -
+            128
+          ) / 128;
+
+        sumSquares +=
+          normalizedSample *
+          normalizedSample;
+      }
+
+      const rms = Math.sqrt(
+        sumSquares /
+          audioData.length,
+      );
+
+      const now =
+        performance.now();
+
+      const elapsed =
+        now -
+        recordingStartedAt;
+
+      if (
+        rms >
+        SPEECH_THRESHOLD
+      ) {
+        heardSpeech = true;
+
+        silenceStartedAt =
+          null;
+      } else if (
+        heardSpeech &&
+        elapsed >
+          MIN_RECORDING_DURATION_MS
+      ) {
+        if (
+          silenceStartedAt ===
+          null
+        ) {
+          silenceStartedAt =
+            now;
+        }
+
+        if (
+          now -
+            silenceStartedAt >=
+          SILENCE_DURATION_MS
+        ) {
+          finishCurrentTurn();
+          return;
+        }
+      }
+
+      silenceFrameRef.current =
+        window.requestAnimationFrame(
+          monitorSilence,
+        );
+    }
+
+    silenceFrameRef.current =
+      window.requestAnimationFrame(
+        monitorSilence,
+      );
+
+    /*
+     * Chirp synchronous recognition is designed
+     * for short recordings. Restart listening
+     * if no speech is heard for too long.
+     */
+    recordingTimeoutRef.current =
+      window.setTimeout(
+        () => {
+          if (
+            recorder.state !==
+            "recording"
+          ) {
+            return;
+          }
+
+          if (!heardSpeech) {
+            discardRecordingRef.current =
+              true;
+          } else {
+            setCallPhase(
+              "transcribing",
+            );
+          }
+
+          recorder.stop();
+        },
+        MAX_RECORDING_DURATION_MS,
+      );
+  }
+
+
+  /*
+   * Complete one speech-to-speech turn:
+   *
+   * STT → ADK → TTS → playback
+   */
+  async function processVoiceTurn(
+    audioBlob,
+    token,
+  ) {
     try {
-      const result =
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      setCallPhase(
+        "transcribing",
+      );
+
+      const transcription =
         await transcribeAudio({
           audioBlob,
           languageCode,
         });
 
-      const existingText =
-        typedTextBeforeRecordingRef
-          .current;
+      if (!isCallActive(token)) {
+        return;
+      }
 
-      const completeQuestion = [
-        existingText,
-        result.transcript,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const transcript = (
+        transcription.transcript ||
+        transcription.text ||
+        ""
+      ).trim();
 
-      setQuestion(
-        completeQuestion
+      if (!transcript) {
+        throw new Error(
+          "No speech was detected.",
+        );
+      }
+
+      setCallPhase("thinking");
+
+      const agentResult =
+        await sendMessage({
+          question: transcript,
+          userId: USER_ID,
+          sessionId:
+            voiceSessionIdRef.current,
+        });
+
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      if (
+        agentResult.session_id
+      ) {
+        voiceSessionIdRef.current =
+          agentResult.session_id;
+      }
+
+      const answer =
+        agentResult.answer?.trim();
+
+      if (!answer) {
+        throw new Error(
+          "The assistant returned an empty response.",
+        );
+      }
+
+      setCallPhase(
+        "preparing",
       );
 
-      setBackendStatus(
-        "connected"
+      const speechBlob =
+        await synthesizeSpeech({
+          text: answer,
+          languageCode,
+        });
+
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      await playAssistantAudio(
+        speechBlob,
+        token,
       );
-    } catch (
-      transcriptionError
-    ) {
-      setError(
-        transcriptionError.message
+
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      /*
+       * Automatically return to listening
+       * after the assistant finishes speaking.
+       */
+      await delay(250);
+
+      if (isCallActive(token)) {
+        await startRecordingCycle(
+          token,
+        );
+      }
+    } catch (voiceError) {
+      if (!isCallActive(token)) {
+        return;
+      }
+
+      setCallPhase("error");
+
+      setCallError(
+        voiceError.message ||
+          "The voice conversation failed.",
       );
-    } finally {
-      setIsTranscribing(false);
     }
   }
 
 
-  async function handleSubmit(
-    event
-  ) {
-    event.preventDefault();
-
-    const cleanQuestion =
-      question.trim();
-
+  /*
+   * Retry after a voice-call error.
+   */
+  async function retryVoiceCall() {
     if (
-      !cleanQuestion ||
-      isLoading ||
-      isRecording ||
-      isTranscribing
+      !callActiveRef.current
     ) {
       return;
     }
 
-    stopSpeaking();
+    const token =
+      callTokenRef.current;
 
-    setMessages(
-      (currentMessages) => [
-        ...currentMessages,
-        {
-          id: createId(),
-          role: "user",
-          text: cleanQuestion,
-        },
-      ]
+    setCallError("");
+
+    await startRecordingCycle(
+      token,
     );
-
-    setQuestion("");
-    setError("");
-    setIsLoading(true);
-
-    try {
-      const result =
-        await sendMessage({
-          question:
-            cleanQuestion,
-
-          userId:
-            USER_ID,
-
-          sessionId,
-        });
-
-      if (result.session_id) {
-        setSessionId(
-          result.session_id
-        );
-
-        localStorage.setItem(
-          "agent_session_id",
-          result.session_id
-        );
-      }
-
-      const assistantMessageId =
-        createId();
-
-      const assistantMessage = {
-        id:
-          assistantMessageId,
-
-        role:
-          "assistant",
-
-        text:
-          result.answer,
-
-        agent:
-          result.agent,
-
-        audioUrl:
-          "",
-
-        /*
-         * Audio generation begins immediately
-         * after the text appears.
-         */
-        audioStatus:
-          "loading",
-
-        audioError:
-          "",
-      };
-
-      setMessages(
-        (currentMessages) => [
-          ...currentMessages,
-          assistantMessage,
-        ]
-      );
-
-      setBackendStatus(
-        "connected"
-      );
-
-      /*
-       * Do not await this call.
-       *
-       * The response text remains visible while
-       * TTS is generated in the background.
-       */
-      void prepareMessageAudio({
-        messageId:
-          assistantMessageId,
-
-        text:
-          result.answer,
-
-        shouldAutoPlay:
-          autoSpeak,
-      });
-    } catch (requestError) {
-      setBackendStatus(
-        "disconnected"
-      );
-
-      setError(
-        requestError.message
-      );
-    } finally {
-      setIsLoading(false);
-    }
   }
 
 
-  function handleKeyDown(
-    event
-  ) {
+  /*
+   * End the call and return to chatbot.
+   */
+  function closeVoiceCall() {
+    callActiveRef.current =
+      false;
+
+    callTokenRef.current += 1;
+
+    discardRecordingRef.current =
+      true;
+
+    cleanupRecordingDetection();
+
+    const recorder =
+      recorderRef.current;
+
     if (
-      event.key === "Enter" &&
-      !event.shiftKey
+      recorder &&
+      recorder.state !==
+        "inactive"
     ) {
-      event.preventDefault();
-
-      if (
-        question.trim() &&
-        !isLoading &&
-        !isRecording &&
-        !isTranscribing
-      ) {
-        event.currentTarget
-          .form
-          .requestSubmit();
+      try {
+        recorder.stop();
+      } catch {
+        // Recorder may already be stopping.
       }
     }
+
+    recorderRef.current =
+      null;
+
+    stopAssistantAudio();
+    stopMicrophoneStream();
+
+    voiceSessionIdRef.current =
+      "";
+
+    setCallOpen(false);
+    setCallPhase("idle");
+    setCallError("");
   }
 
 
-  function handleLanguageChange(
-    event
-  ) {
-    const newLanguage =
-      event.target.value;
-
-    /*
-     * Existing cached audio was generated
-     * using the previous language.
-     */
-    audioGenerationVersionRef.current +=
-      1;
-
-    cleanupGeneratedAudio();
-
-    setLanguageCode(
-      newLanguage
-    );
-
-    setMessages(
-      (currentMessages) =>
-        currentMessages.map(
-          (message) => {
-            if (
-              message.role !==
-              "assistant"
-            ) {
-              return message;
-            }
-
-            return {
-              ...message,
-              audioUrl: "",
-              audioStatus: "idle",
-              audioError: "",
-            };
-          }
-        )
-    );
-  }
-
-
-  function startNewChat() {
-    localStorage.removeItem(
-      "agent_session_id"
-    );
-
-    if (isRecording) {
-      stopRecording();
+  function startNewConversation() {
+    if (callOpen) {
+      closeVoiceCall();
     }
 
-    /*
-     * Invalidates any background TTS
-     * requests from the old chat.
-     */
-    audioGenerationVersionRef.current +=
-      1;
+    localStorage.removeItem(
+      "text_chat_session_id",
+    );
 
-    cleanupGeneratedAudio();
-
-    setSessionId("");
+    setTextSessionId("");
     setQuestion("");
     setError("");
 
     setMessages([
-      createAssistantMessage(
-        "New voice conversation started. How can I help?"
+      createMessage(
+        "assistant",
+        "New conversation started. Type a message or start a voice call.",
       ),
     ]);
   }
 
 
-  const microphoneLabel = (() => {
-    if (isTranscribing) {
-      return "Transcribing...";
-    }
+  const callStatus = {
+    connecting:
+      "Connecting to your microphone…",
 
-    if (isRecording) {
-      return "■ Stop";
-    }
+    listening:
+      "Listening…",
 
-    return "🎤 Record";
-  })();
+    transcribing:
+      "Understanding what you said…",
+
+    thinking:
+      "Thinking…",
+
+    preparing:
+      "Preparing voice response…",
+
+    speaking:
+      "AI is speaking…",
+
+    error:
+      "Voice call paused",
+
+    idle:
+      "Ready",
+  }[callPhase];
+
+
+  const callDescription = {
+    connecting:
+      "Please allow microphone access.",
+
+    listening:
+      "Speak naturally. The call will respond when you stop speaking.",
+
+    transcribing:
+      "Converting your voice into text.",
+
+    thinking:
+      "The assistant is preparing an answer.",
+
+    preparing:
+      "Generating the spoken response.",
+
+    speaking:
+      "You can continue after the assistant finishes.",
+
+    error:
+      callError,
+
+    idle:
+      "",
+  }[callPhase];
 
 
   return (
-    <main className="page">
-      <section className="chat-container">
-        <header className="chat-header">
-          <div>
-            <p className="eyebrow">
-              Chirp 3 + Gemini TTS
-            </p>
+    <main className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">
+            VA
+          </div>
 
+          <div>
+            <strong>
+              AI Assistant
+            </strong>
+
+            <span>
+              Text and voice
+            </span>
+          </div>
+        </div>
+
+
+        <button
+          type="button"
+          className="new-chat-button"
+          onClick={
+            startNewConversation
+          }
+        >
+          <span>＋</span>
+
+          New conversation
+        </button>
+
+
+        <div className="sidebar-section">
+          <p className="sidebar-heading">
+            Capabilities
+          </p>
+
+          <div className="capability">
+            <span>◫</span>
+
+            Company-policy RAG
+          </div>
+
+          <div className="capability">
+            <span>⌕</span>
+
+            Current web search
+          </div>
+
+          <div className="capability">
+            <span>☎</span>
+
+            AI voice calls
+          </div>
+        </div>
+
+
+        <div className="sidebar-bottom">
+          <div
+            className={
+              `backend-status ${backendStatus}`
+            }
+          >
+            <span className="status-dot" />
+
+            <div>
+              <strong>
+                {backendStatus ===
+                "connected"
+                  ? "Backend online"
+                  : backendStatus ===
+                      "checking"
+                    ? "Checking backend"
+                    : "Backend offline"}
+              </strong>
+
+              <small>
+                FastAPI · Vertex AI
+              </small>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+
+      <section className="chat-workspace">
+        <header className="topbar">
+          <div>
             <h1>
-              Multi-Agent Voice AI
+              AI Assistant
             </h1>
 
-            <p className="subtitle">
-              Master Agent, RAG, web search,
-              cloud STT and cloud TTS.
+            <p>
+              Type for text chat or use the microphone for a voice call.
             </p>
           </div>
 
-          <div className="header-actions">
-            <span
-              className={
-                `status ${backendStatus}`
-              }
-            >
-              {backendStatus ===
-                "checking" &&
-                "Checking backend"}
 
-              {backendStatus ===
-                "connected" &&
-                "Backend connected"}
-
-              {backendStatus ===
-                "disconnected" &&
-                "Backend disconnected"}
+          <label className="language-control">
+            <span>
+              Voice language
             </span>
-
-            <button
-              type="button"
-              className="new-chat-button"
-              onClick={startNewChat}
-            >
-              New chat
-            </button>
-          </div>
-        </header>
-
-
-        <div className="voice-settings">
-          <label>
-            Voice language
 
             <select
               value={languageCode}
-              onChange={
-                handleLanguageChange
+              onChange={(event) =>
+                setLanguageCode(
+                  event.target.value,
+                )
               }
-              disabled={
-                isRecording ||
-                isTranscribing ||
-                isSpeaking
-              }
+              disabled={callOpen}
             >
               <option value="en-IN">
                 English — South Asian
@@ -985,269 +1413,278 @@ function App() {
               </option>
             </select>
           </label>
+        </header>
 
 
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={autoSpeak}
-              onChange={(event) =>
-                setAutoSpeak(
-                  event.target.checked
-                )
-              }
-            />
-
-            Automatically speak answers
-          </label>
-
-
-          {isSpeaking && (
-            <button
-              type="button"
-              className="stop-speaking-button"
-              onClick={stopSpeaking}
-            >
-              Stop audio
-            </button>
-          )}
-        </div>
-
-
-        {!microphoneSupported && (
-          <div className="speech-warning">
-            Microphone recording is not
-            supported in this browser.
-          </div>
-        )}
-
-
-        <section className="messages">
-          {messages.map(
-            (message) => (
-              <article
-                key={message.id}
-                className={
-                  `message-row ${message.role}`
-                }
-              >
-                <div className="message-bubble">
-                  <span className="message-label">
+        <section className="conversation">
+          <div className="conversation-inner">
+            {messages.map(
+              (message) => (
+                <article
+                  key={message.id}
+                  className={
+                    `message ${message.role}`
+                  }
+                >
+                  <div className="avatar">
                     {message.role ===
-                    "user"
-                      ? "You"
-                      : "Assistant"}
-                  </span>
+                    "assistant"
+                      ? "AI"
+                      : "You"}
+                  </div>
 
-                  <p>
-                    {message.text}
-                  </p>
+                  <div className="message-content">
+                    <div className="message-heading">
+                      <strong>
+                        {message.role ===
+                        "assistant"
+                          ? "Assistant"
+                          : "You"}
+                      </strong>
 
-                  {message.agent && (
-                    <small className="agent-label">
-                      Response:{" "}
-                      {message.agent}
-                    </small>
-                  )}
-
-
-                  {message.role ===
-                    "assistant" && (
-                    <div className="message-audio">
-                      <button
-                        type="button"
-                        className="speak-button"
-                        disabled={
-                          message.audioStatus ===
-                          "loading"
-                        }
-                        onClick={() => {
-                          if (
-                            message.audioStatus ===
-                              "ready" &&
-                            message.audioUrl
-                          ) {
-                            void playPreparedAudio(
-                              message.audioUrl
-                            );
-
-                            return;
-                          }
-
-                          void prepareMessageAudio({
-                            messageId:
-                              message.id,
-
-                            text:
-                              message.text,
-
-                            shouldAutoPlay:
-                              true,
-                          });
-                        }}
-                      >
-                        {message.audioStatus ===
-                          "loading" &&
-                          "⏳ Preparing audio..."}
-
-                        {message.audioStatus ===
-                          "ready" &&
-                          "🔊 Speak"}
-
-                        {message.audioStatus ===
-                          "error" &&
-                          "↻ Retry audio"}
-
-                        {(!message.audioStatus ||
-                          message.audioStatus ===
-                            "idle") &&
-                          "🔊 Generate audio"}
-                      </button>
-
-
-                      {message.audioStatus ===
-                        "ready" && (
-                        <span className="audio-ready">
-                          Audio ready
-                        </span>
-                      )}
-
-
-                      {message.audioError && (
-                        <small className="audio-error">
-                          {message.audioError}
-                        </small>
-                      )}
+                      <span>
+                        {message.createdAt}
+                      </span>
                     </div>
-                  )}
+
+                    <div className="message-body">
+                      {message.text}
+                    </div>
+                  </div>
+                </article>
+              ),
+            )}
+
+
+            {isTextLoading && (
+              <article className="message assistant">
+                <div className="avatar">
+                  AI
+                </div>
+
+                <div className="message-content">
+                  <div className="message-heading">
+                    <strong>
+                      Assistant
+                    </strong>
+                  </div>
+
+                  <div className="thinking-card">
+                    <div className="thinking-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+
+                    <p>
+                      Thinking…
+                    </p>
+                  </div>
                 </div>
               </article>
-            )
-          )}
+            )}
 
 
-          {isLoading && (
-            <article className="message-row assistant">
-              <div className="message-bubble loading-bubble">
-                <span className="message-label">
-                  Assistant
-                </span>
-
-                <div className="typing-row">
-                  <span />
-                  <span />
-                  <span />
-
-                  <p>
-                    Selecting the appropriate
-                    agent...
-                  </p>
-                </div>
-              </div>
-            </article>
-          )}
-
-
-          {isTranscribing && (
-            <article className="message-row assistant">
-              <div className="message-bubble loading-bubble">
-                <span className="message-label">
-                  Chirp 3
-                </span>
-
-                <div className="typing-row">
-                  <span />
-                  <span />
-                  <span />
-
-                  <p>
-                    Transcribing your recording...
-                  </p>
-                </div>
-              </div>
-            </article>
-          )}
-
-          <div ref={messagesEndRef} />
+            <div ref={messagesEndRef} />
+          </div>
         </section>
 
 
-        {error && (
-          <div className="error-box">
-            <strong>Error:</strong>{" "}
-            {error}
-          </div>
-        )}
+        <footer className="composer-area">
+          {error && (
+            <div className="error-banner">
+              <span>{error}</span>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setError("")
+                }
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          )}
 
 
-        <form
-          className="chat-form"
-          onSubmit={handleSubmit}
-        >
-          <div className="question-area">
+          <form
+            className="composer"
+            onSubmit={
+              handleTextSubmit
+            }
+          >
             <textarea
+              rows={1}
               value={question}
               onChange={(event) =>
                 setQuestion(
-                  event.target.value
+                  event.target.value,
                 )
               }
               onKeyDown={
-                handleKeyDown
+                handleTextKeyDown
               }
-              placeholder={
-                isRecording
-                  ? "Recording... Speak clearly, then press Stop."
-                  : isTranscribing
-                    ? "Converting speech to text..."
-                    : "Type a question or record your voice..."
-              }
-              rows={3}
+              placeholder="Message your AI assistant…"
               disabled={
-                isLoading ||
-                isTranscribing
+                isTextLoading ||
+                callOpen
               }
             />
 
+
+            <div className="composer-actions">
+              <button
+                type="button"
+                className="call-button"
+                onClick={
+                  beginVoiceCall
+                }
+                disabled={
+                  isTextLoading ||
+                  callOpen ||
+                  !microphoneSupported
+                }
+                aria-label="Start voice call"
+                title="Start voice call"
+              >
+                🎙
+              </button>
+
+              <button
+                type="submit"
+                className="send-button"
+                disabled={
+                  !question.trim() ||
+                  isTextLoading ||
+                  callOpen
+                }
+                aria-label="Send text message"
+              >
+                ➜
+              </button>
+            </div>
+          </form>
+
+          <p className="composer-note">
+            Typed messages receive text responses only
+          </p>
+        </footer>
+      </section>
+
+
+      {callOpen && (
+        <section className="voice-call-overlay">
+          <header className="voice-call-header">
+            <div className="voice-call-title">
+              <div className="call-mini-avatar">
+                AI
+              </div>
+
+              <div>
+                <strong>
+                  AI Voice Call
+                </strong>
+
+                <span>
+                  {formatDuration(
+                    callDuration,
+                  )}
+                </span>
+              </div>
+            </div>
+
             <button
               type="button"
-              className={
-                isRecording
-                  ? "microphone-button listening"
-                  : "microphone-button"
-              }
+              className="call-close-button"
               onClick={
-                isRecording
-                  ? stopRecording
-                  : startRecording
+                closeVoiceCall
               }
-              disabled={
-                !microphoneSupported ||
-                isLoading ||
-                isTranscribing
+              aria-label="Close voice call"
+              title="Close voice call"
+            >
+              ×
+            </button>
+          </header>
+
+
+          <div className="voice-call-content">
+            <div
+              className={
+                `call-avatar-container ${callPhase}`
               }
             >
-              {microphoneLabel}
-            </button>
+              <span className="call-ring ring-one" />
+              <span className="call-ring ring-two" />
+              <span className="call-ring ring-three" />
+
+              <div className="call-avatar">
+                AI
+              </div>
+            </div>
+
+
+            <h2>
+              {callStatus}
+            </h2>
+
+            <p className="call-description">
+              {callDescription}
+            </p>
+
+
+            <div
+              className={
+                `call-waveform ${callPhase}`
+              }
+              aria-hidden="true"
+            >
+              {Array.from(
+                { length: 18 },
+                (_, index) => (
+                  <span
+                    key={index}
+                    style={{
+                      animationDelay:
+                        `${index * 0.06}s`,
+                    }}
+                  />
+                ),
+              )}
+            </div>
+
+
+            {callPhase ===
+              "error" && (
+              <button
+                type="button"
+                className="retry-call-button"
+                onClick={
+                  retryVoiceCall
+                }
+              >
+                Try again
+              </button>
+            )}
           </div>
 
 
-          <button
-            type="submit"
-            className="send-button"
-            disabled={
-              !question.trim() ||
-              isLoading ||
-              isRecording ||
-              isTranscribing
-            }
-          >
-            {isLoading
-              ? "Sending..."
-              : "Send"}
-          </button>
-        </form>
-      </section>
+          <footer className="voice-call-actions">
+            <button
+              type="button"
+              className="hangup-button"
+              onClick={
+                closeVoiceCall
+              }
+              aria-label="End voice call"
+            >
+              <span>☎</span>
+
+              End call
+            </button>
+          </footer>
+        </section>
+      )}
     </main>
   );
 }

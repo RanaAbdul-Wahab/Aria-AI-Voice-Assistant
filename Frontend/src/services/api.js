@@ -1,9 +1,13 @@
-const API_BASE_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://127.0.0.1:8000";
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://127.0.0.1:8000"
+).replace(/\/$/, "");
 
 
-async function readError(response) {
+async function getErrorMessage(
+  response,
+  fallbackMessage,
+) {
   try {
     const data = await response.json();
 
@@ -13,36 +17,34 @@ async function readError(response) {
 
     if (Array.isArray(data.detail)) {
       return data.detail
-        .map((item) => item.msg)
+        .map((item) => {
+          const location =
+            item.loc?.join(".") ||
+            "request";
+
+          return `${location}: ${item.msg}`;
+        })
         .join(", ");
     }
 
     return (
       data.message ||
-      `Request failed with status ${response.status}.`
+      fallbackMessage
     );
   } catch {
-    return `Request failed with status ${response.status}.`;
+    return fallbackMessage;
   }
 }
 
 
 export async function checkBackendHealth() {
-  let response;
-
-  try {
-    response = await fetch(
-      `${API_BASE_URL}/health`
-    );
-  } catch {
-    throw new Error(
-      "Cannot connect to the backend."
-    );
-  }
+  const response = await fetch(
+    `${API_BASE_URL}/health`,
+  );
 
   if (!response.ok) {
     throw new Error(
-      await readError(response)
+      "Backend is unavailable.",
     );
   }
 
@@ -55,36 +57,33 @@ export async function sendMessage({
   userId,
   sessionId,
 }) {
-  let response;
+  const response = await fetch(
+    `${API_BASE_URL}/api/chat`,
+    {
+      method: "POST",
 
-  try {
-    response = await fetch(
-      `${API_BASE_URL}/api/chat`,
-      {
-        method: "POST",
+      headers: {
+        "Content-Type":
+          "application/json",
+      },
 
-        headers: {
-          "Content-Type": "application/json",
-        },
-
-        body: JSON.stringify({
-          question,
-          user_id: userId,
-          session_id: sessionId || null,
-        }),
-      }
-    );
-  } catch {
-    throw new Error(
-      "Cannot connect to the backend. " +
-        "Confirm FastAPI is running on port 8000."
-    );
-  }
+      body: JSON.stringify({
+        question,
+        user_id: userId,
+        session_id:
+          sessionId || null,
+      }),
+    },
+  );
 
   if (!response.ok) {
-    throw new Error(
-      await readError(response)
-    );
+    const message =
+      await getErrorMessage(
+        response,
+        "The assistant could not process your message.",
+      );
+
+    throw new Error(message);
   }
 
   return response.json();
@@ -95,49 +94,61 @@ export async function transcribeAudio({
   audioBlob,
   languageCode,
 }) {
-  const formData = new FormData();
-
-  let extension = "webm";
-
-  if (audioBlob.type.includes("ogg")) {
-    extension = "ogg";
+  if (
+    !audioBlob ||
+    audioBlob.size === 0
+  ) {
+    throw new Error(
+      "No microphone recording was captured.",
+    );
   }
 
-  if (audioBlob.type.includes("wav")) {
-    extension = "wav";
-  }
+  const formData =
+    new FormData();
 
+  const isOgg =
+    audioBlob.type.includes("ogg");
+
+  const extension =
+    isOgg ? "ogg" : "webm";
+
+  /*
+   * This must match:
+   *
+   * audio: UploadFile = File(...)
+   */
   formData.append(
     "audio",
     audioBlob,
-    `voice-recording.${extension}`
+    `voice-recording.${extension}`,
   );
 
   formData.append(
     "language_code",
-    languageCode
+    languageCode || "en-IN",
   );
 
-  let response;
+  const response = await fetch(
+    `${API_BASE_URL}/api/stt`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
 
-  try {
-    response = await fetch(
-      `${API_BASE_URL}/api/stt`,
-      {
-        method: "POST",
-        body: formData,
-      }
-    );
-  } catch {
-    throw new Error(
-      "Could not upload the voice recording."
-    );
-  }
+  /*
+   * Do not manually set Content-Type.
+   * The browser creates the multipart boundary.
+   */
 
   if (!response.ok) {
-    throw new Error(
-      await readError(response)
-    );
+    const message =
+      await getErrorMessage(
+        response,
+        "Speech transcription failed.",
+      );
+
+    throw new Error(message);
   }
 
   return response.json();
@@ -148,36 +159,40 @@ export async function synthesizeSpeech({
   text,
   languageCode,
 }) {
-  let response;
+  const cleanText = text?.trim();
 
-  try {
-    response = await fetch(
-      `${API_BASE_URL}/api/tts`,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type": "application/json",
-        },
-
-        body: JSON.stringify({
-          text,
-          language_code: languageCode,
-          voice_name: "Kore",
-          prompt: null,
-        }),
-      }
-    );
-  } catch {
+  if (!cleanText) {
     throw new Error(
-      "Could not connect to the Text-to-Speech service."
+      "Text is required for speech generation.",
     );
   }
 
+  const response = await fetch(
+    `${API_BASE_URL}/api/tts`,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json",
+      },
+
+      body: JSON.stringify({
+        text: cleanText,
+        language_code:
+          languageCode || "en-IN",
+      }),
+    },
+  );
+
   if (!response.ok) {
-    throw new Error(
-      await readError(response)
-    );
+    const message =
+      await getErrorMessage(
+        response,
+        "Voice generation failed.",
+      );
+
+    throw new Error(message);
   }
 
   return response.blob();
