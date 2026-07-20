@@ -22,6 +22,65 @@ const MAX_RECORDING_DURATION_MS = 50_000;
 const SPEECH_THRESHOLD = 0.018;
 
 
+/*
+ * Suggested starter prompts shown on the welcome screen.
+ *
+ * `icon` is one of the keys handled by <PromptIcon> below.
+ * Clicking a card sends `text` straight to the assistant.
+ */
+const SUGGESTED_PROMPTS = [
+  {
+    icon: "document",
+    title: "Summarize the maternity policy",
+    text: "Summarize our company maternity leave policy.",
+  },
+  {
+    icon: "document",
+    title: "Travel & TADA reimbursement",
+    text: "What are the travel and TADA reimbursement rules?",
+  },
+  {
+    icon: "search",
+    title: "Latest AI news",
+    text: "What are the latest developments in AI this week?",
+  },
+  {
+    icon: "edit",
+    title: "Draft an out-of-office email",
+    text: "Draft a professional out-of-office email for a one-week leave.",
+  },
+];
+
+
+function PromptIcon({ name }) {
+  if (name === "search") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m21 21-4.3-4.3" />
+      </svg>
+    );
+  }
+
+  if (name === "edit") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 20h9" />
+        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h6" />
+    </svg>
+  );
+}
+
+
 function createId() {
   if (globalThis.crypto?.randomUUID) {
     return globalThis.crypto.randomUUID();
@@ -103,12 +162,7 @@ function App() {
     useState("");
 
   const [messages, setMessages] =
-    useState([
-      createMessage(
-        "assistant",
-        "Hello! Type a message or start a voice call.",
-      ),
-    ]);
+    useState([]);
 
   const [
     textSessionId,
@@ -541,13 +595,13 @@ function App() {
   }
 
 
-  async function handleTextSubmit(
-    event,
-  ) {
-    event.preventDefault();
-
+  /*
+   * Shared send path used by both the composer form and the
+   * welcome-screen prompt cards. `rawText` is the message to send.
+   */
+  async function submitQuestion(rawText) {
     const cleanQuestion =
-      question.trim();
+      (rawText || "").trim();
 
     if (
       !cleanQuestion ||
@@ -610,6 +664,13 @@ function App() {
     } finally {
       setIsTextLoading(false);
     }
+  }
+
+
+  function handleTextSubmit(event) {
+    event.preventDefault();
+
+    void submitQuestion(question);
   }
 
 
@@ -1217,12 +1278,7 @@ function App() {
     setQuestion("");
     setError("");
 
-    setMessages([
-      createMessage(
-        "assistant",
-        "New conversation started. Type a message or start a voice call.",
-      ),
-    ]);
+    setMessages([]);
   }
 
 
@@ -1313,7 +1369,9 @@ function App() {
             startNewConversation
           }
         >
-          <span>＋</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
 
           New conversation
         </button>
@@ -1325,19 +1383,34 @@ function App() {
           </p>
 
           <div className="capability">
-            <span>◫</span>
+            <span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                <path d="M14 3v5h5" />
+                <path d="M9 13h6M9 17h6" />
+              </svg>
+            </span>
 
             Company-policy RAG
           </div>
 
           <div className="capability">
-            <span>⌕</span>
+            <span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m21 21-4.3-4.3" />
+              </svg>
+            </span>
 
             Current web search
           </div>
 
           <div className="capability">
-            <span>☎</span>
+            <span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
+              </svg>
+            </span>
 
             AI voice calls
           </div>
@@ -1416,7 +1489,58 @@ function App() {
 
 
         <section className="conversation">
-          <div className="conversation-inner">
+          {messages.length === 0 &&
+          !isTextLoading ? (
+            <div className="welcome">
+              <div className="welcome-mark">
+                VA
+              </div>
+
+              <h2>
+                How can I help you today?
+              </h2>
+
+              <p>
+                Ask about company policies, search the web for
+                current information, or start a voice call.
+              </p>
+
+              <div className="prompt-grid">
+                {SUGGESTED_PROMPTS.map(
+                  (prompt) => (
+                    <button
+                      key={prompt.title}
+                      type="button"
+                      className="prompt-card"
+                      onClick={() =>
+                        submitQuestion(
+                          prompt.text,
+                        )
+                      }
+                      disabled={callOpen}
+                    >
+                      <span className="prompt-card-icon">
+                        <PromptIcon
+                          name={prompt.icon}
+                        />
+                      </span>
+
+                      <span className="prompt-card-text">
+                        <strong>
+                          {prompt.title}
+                        </strong>
+
+                        <span>
+                          {prompt.text}
+                        </span>
+                      </span>
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="conversation-inner">
             {messages.map(
               (message) => (
                 <article
@@ -1485,7 +1609,8 @@ function App() {
 
 
             <div ref={messagesEndRef} />
-          </div>
+            </div>
+          )}
         </section>
 
 
@@ -1547,7 +1672,11 @@ function App() {
                 aria-label="Start voice call"
                 title="Start voice call"
               >
-                🎙
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <path d="M12 19v3" />
+                </svg>
               </button>
 
               <button
@@ -1560,7 +1689,10 @@ function App() {
                 }
                 aria-label="Send text message"
               >
-                ➜
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 19V5" />
+                  <path d="m5 12 7-7 7 7" />
+                </svg>
               </button>
             </div>
           </form>
@@ -1681,7 +1813,9 @@ function App() {
                 title="Stop AI voice and continue speaking"
               >
                 <span className="interrupt-icon">
-                  ■
+                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
                 </span>
 
                 Interrupt
@@ -1696,7 +1830,10 @@ function App() {
               }
               aria-label="End voice call"
             >
-              <span>☎</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 8.63 15.4a19.42 19.42 0 0 1-3.33-4.53" />
+                <path d="M22 2 2 22" />
+              </svg>
 
               End call
             </button>
